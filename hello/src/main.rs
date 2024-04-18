@@ -1,126 +1,71 @@
-use serde::{Serialize, Deserialize};
-use std::fs::OpenOptions;
-use std::io::prelude::*;
-#[derive(Serialize, Deserialize, Debug)]
-struct FileData{
-    name: String,
-    files:Vec<String>
-}
 use std::{
-    ffi::OsStr,
-    fs::File,
-    io::{Read, Seek}, iter::Zip, path::{self, PathBuf},
+    collections::HashSet, fs::File, io::{BufRead, BufReader}, time::Instant
 };
+use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 
-use zip::read::ZipFile;
-use std::fs;    
-
-/// Parametrul de tipul `impl Read + Seek` se numește "argument position impl trait" (APIT)
-/// o formulare echivalentă ar fi `fn list_zip_contents<T: Read + Seek>(reader: T)`
-/// `Read` și `Seek` sunt traits, care sunt oarecum similare cu interfețele din Java
-///   o diferență este că traiturile nu sunt declarate direct de structuri (cum e în java `class C implements I`),
-///   ci se pot declara separat: `impl Trait for Struct`
-/// de asemenea generics în Rust diferă de cele din Java prin faptul că sunt monomorfice,
-///   adică la compilare pentru o funcție generică se generează implementări separate pentru fiecare instanțiere cu argumente de tipuri diferite
-///   (asta le aseamănă mai mult cu templates din C++)
-/// https://doc.rust-lang.org/book/ch10-00-generics.html
-///
-/// deci practic lui `list_zip_contents` trebuie să-i dăm ca arugment o valoare al cărei tip implementează `Read` și `Seek`
-///   un exemplu e `std::fs::File` (ar mai fi de exemplu `std::io::Cursor` cu care putem folosi un buffer din memorie)
-/// 
-
-
-
-
-fn list_zip_contents(reader: impl Read + Seek,pb:PathBuf) -> Result<FileData,Box<dyn std::error::Error>>{
-    let mut zip = zip::ZipArchive::new(reader)?;
-
-    let mut filenames:Vec<String>=Vec::new();
-
-    for i in 0..zip.len() {
-        let file = zip.by_index(i)?;
-        filenames.push(file.name().to_string());
-        //println!("\tFilename: {}", file.name());
-    }
-    let fd=FileData{
-        name:pb.to_str().unwrap().to_string(),
-        files:filenames
-    };
-    Ok(fd)
+#[derive(Debug, Serialize, Deserialize)]
+struct FileData {
+    /// name of the zip archive
+    name: String,
+    /// list of files in the zip archive
+    files: Vec<String>,
 }
+type Term=String;
+type DocumentId=String;
+type IndexType=HashMap<Term,HashSet<DocumentId>>;
 
-/// La `Box<dyn std::error::Error>` vedem o altă utilizare a traiturilor, de data asta sub formă de "trait objects".
-/// Obiectele de tipul `dyn Trait` sunt un fel de pointeri polimorfici la structuri care implementează `Trait`.
-/// Din nou putem face o paralelă la Java sau C++, unde o variabilă de tipul `Error e` poate să referențieze o
-///   instanță a orcărei clase care implementează interfața (sau extinde clasa de bază) `Error`.
-///
-/// Valorile de typ `dyn Trait` trebuie mereu să fie în spatele unei referințe: `Box<dyn Trait>`, `&dyn Trait`, `&mut dyn Trait`, etc,
-///  asta e pentru că nu știm exact ce obiect e în spatele pointerului și ce size are (se zice că trait objects sunt `unsized types`)
-///
-/// https://doc.rust-lang.org/book/ch17-02-trait-objects.html
-///
-/// `Box<dyn std::error::Error>` e util ca tip de eroare fiindcă în principiu toate erorile în Rust implementează `std::error::Error`
-///   deci se pot converti implicit la `Box<dyn std::error::Error>` (ceea ce se întâmplă când folosim operatorul `?` de propagare).
+fn load_data(data_filename: &str) -> Result<IndexType, Box<dyn std::error::Error>> {
+    let file = File::open(data_filename)?;
+    let reader = BufReader::new(file);
 
-fn getFileDataArray()->Result<Vec<FileData>,Box<dyn std::error::Error>>{
-    let args: Vec<String> = std::env::args().collect();
-    let mut fileDataArr:Vec<FileData>=Vec::new();
-    let dir = &args[1];
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && path.extension() == Some(OsStr::new("zip")) {
-            let file = File::open(&path)?;
 
-           // println!("Contents of {:?}:", path);
-            let fd=list_zip_contents(file,path)?;
-            fileDataArr.push(fd);
-
-        } else {
-           // println!("Skipping {:?}", path);
+    let mut data : IndexType= IndexType::new();
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
+        let fdata:FileData=serde_json::from_str(line)?;
+        
+        for file in fdata.files{
+            for term in file.split("/"){
+                let mut set:HashSet<String>=HashSet::new();
+                set.insert(fdata.name.to_string());
+                data.entry(term.to_string()).and_modify(|set| {set.insert(fdata.name.to_string());})
+                .or_insert(set);
+            }
         }
     }
-    Ok(fileDataArr)
+    Ok(data)
 }
-
-fn writeZipDataToFile(arr: Vec<FileData>,path:String)->Result<(), Box<dyn std::error::Error>>{
-    let mut file = OpenOptions::new().create(true)
-        .write(true)
-        .open(path)
-        .unwrap();
-
-    
-    for entry in arr{
-        let serialized = serde_json::to_string(&entry).unwrap();
-        if let Err(e) = writeln!(file,"{}\n", serialized) {
-            eprintln!("Couldn't write to file: {}", e);
+fn run_search(data: &IndexType,terms:Vec<&str>)->Result<HashMap<DocumentId,u64>, Box<dyn std::error::Error>>{
+    let mut counter : HashMap<DocumentId,u64>=HashMap::new();
+    for term in terms{
+        let x= data.get(term).unwrap();
+        for val in x {
+            counter.entry(val.to_string()).and_modify(|num| *num+=1).or_insert(1);
         }
     }
-
-    Ok(())
+    Ok(counter)
 }
-
-fn readZipDataFromJsonFile(path:String)->Result<(), Box<dyn std::error::Error>>{
-    let mut fileRead = OpenOptions::new()
-        .read(true)
-        .open(path)
-        .unwrap();
-    let reader = std::io::BufReader::new(fileRead);
-    let mut fileDataReadArr:Vec<FileData>=Vec::new();
-    for line in reader.lines(){
-        let deserialized: FileData=serde_json::from_str(line?.as_str()).unwrap();
-        fileDataReadArr.push(deserialized);
-    }
-    Ok(())
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-   let arr=getFileDataArray();
-    
-   writeZipDataToFile(arr?,"caca.txt".to_owned());
-
-   let arr2=readZipDataFromJsonFile("caca.txt".to_owned());
-
+    let args: Vec<String> = std::env::args().collect();
+    let data_filename = &args[1];
+    let data = load_data(&data_filename)?;
    
+    println!("loaded data for {} files", data.len());
+    // let mut nr=0;
+    // for kv in data{
+    //     println!("{}: {:?}\n\n\n",kv.0,kv.1);
+    //     nr+=1;
+    //     if nr == 10{break;}
+    // }
+    let start =Instant::now();
+
+    let rez=run_search(&data, vec!["lombok","AUTHORS","README.md"]).unwrap();
+    for kv in rez{
+        println!("in {} found {}/3 items",kv.0,kv.1);
+    }
+    println!("elapsed time {:?}",start.elapsed());
+
     Ok(())
 }
