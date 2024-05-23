@@ -16,6 +16,7 @@
             background-color: #f0f0f0;
         }
         .container {
+            margin-top: 100px;
             background-color: white;
             padding: 20px;
             border-radius: 8px;
@@ -71,6 +72,8 @@
             text-align: left;
             display: block;
             width: 80%;
+            flex: 1 1 auto;
+            overflow-y: scroll;
         }
         .results-header {
             font-weight: bold;
@@ -94,6 +97,7 @@
     <div class="header">Bitdefender Cool Zip Search</div>
     <div class="container">
         <div class="upload-area" id="upload-area">Drag & Drop or Click to Upload ZIP/APK File</div>
+        <textarea id="search-terms" placeholder="File names separated by commas" oninput="searchBtn.disabled = this.value.trim() === ''"></textarea><br>
         <input type="number" id="min-score" placeholder="Min Similarity Score" min="0" max="100">
         <input type="number" id="max-length" placeholder="Max Return Length" min="1"><br>
         <button id="search-btn" disabled>Search</button>
@@ -138,17 +142,23 @@
         });
 
         searchBtn.addEventListener('click', () => {
-            const minScore = document.getElementById('min-score').value;
-            const maxLength = document.getElementById('max-length').value;
+            const minScore = parseFloat(document.getElementById('min-score').value);
+            const maxLength = parseInt(document.getElementById('max-length').value);
+            const searchTerms = document.getElementById('search-terms').value;
+            const seatchTermsSeparated = searchTerms.split(',');
 
-            const formData = new FormData();
-            formData.append('file', file);
-            formData.append('min_score', minScore);
-            formData.append('max_length', maxLength);
+            const postData = {
+                terms: seatchTermsSeparated,
+                min_score: minScore,
+                max_length: maxLength
+            };
 
             fetch('/search', {
                 method: 'POST',
-                body: formData
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(postData)
             })
             .then(response => response.json())
             .then(data => {
@@ -156,18 +166,6 @@
             })
             .catch(error => {
                 console.error('Error:', error);
-
-                // sample data
-                const data = {
-                    total: 4,
-                    matches: [
-                        { md5: '1234567890', score: 90 },
-                        { md5: '0987654321', score: 80 },
-                        { md5: '1357924680', score: 70 },
-                        { md5: '2468013579', score: 60 }
-                    ]
-                };
-                load_data(data);
             });
         });
 

@@ -1,14 +1,11 @@
 #[macro_use] extern crate rocket;
 
 use std::{
-    collections::HashMap,
-    fs::File,
-    io::{BufRead, BufReader},
-    time::Instant,
-    sync::{Arc, RwLock},
+    borrow::Borrow, collections::HashMap, fs::File, io::{BufRead, BufReader}, sync::{Arc, RwLock}, time::Instant, vec
 };
+use rocket_okapi::{openapi, openapi_get_routes, swagger_ui::*, JsonSchema};
 
-use rocket::{fs::FileServer, serde::json::Json};
+use rocket::{fs::FileServer, http::hyper::server::{self, Server}, serde::json::Json,State};
 
 use serde::{Deserialize, Serialize};
 
@@ -86,7 +83,7 @@ fn load_data(
     Ok(index)
 }
 
-fn run_search(data: &IndexedData, terms: Vec<&str>) -> Vec<(DocumentId, f64)> {
+fn run_search(data: &IndexedData, terms: Vec<&str>) -> Vec<SearchMatch> {
     let mut counter: HashMap<DocumentId, u64> = HashMap::new();
     for term in &terms {
         if let Some(docs) = data.terms_to_docs.get(*term) {
@@ -97,11 +94,11 @@ fn run_search(data: &IndexedData, terms: Vec<&str>) -> Vec<(DocumentId, f64)> {
         }
     }
 
-    let mut scores: Vec<(DocumentId, f64)> = Vec::new();
-    for (doc, cnt) in counter {
-        scores.push((doc.to_string(), cnt as f64 / terms.len() as f64));
+    let mut scores: Vec<SearchMatch> = Vec::new();
+    for (doc, cnt) in counter {//(doc.to_string(), cnt as f64 / terms.len() as f64)
+        scores.push(SearchMatch{md5:doc.to_string(),score:cnt as f64/terms.len() as f64});
     }
-    scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scores.sort_by(|a, b| b.score.total_cmp(&a.score));
     scores
 }
 
@@ -110,13 +107,38 @@ fn run_search(data: &IndexedData, terms: Vec<&str>) -> Vec<(DocumentId, f64)> {
 struct Greeting {
     message: String,
 }
-
+#[derive(Deserialize, JsonSchema)]
+struct SearchData{
+    terms:Vec<String>,
+}
+#[derive(Serialize,JsonSchema)]
+struct SearchResult{
+    matches:Vec<SearchMatch>,
+    total:u64
+}
+#[derive(Serialize,JsonSchema)]
+struct SearchMatch{
+    md5:DocumentId,
+    score:f64
+}
+#[openapi(tag = "Users")]
+#[post("/search",data="<req>")]
+fn search(req:Json<SearchData>,server_state: &State<Arc<RwLock<ServerState>>>) -> Result<Json<SearchResult>,String>{
+    let terms =req.terms.clone();
+    let vec_of_strs: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
+    let result=run_search(&server_state.read().unwrap().index, vec_of_strs);
+    let l=result.len();
+    let sr=SearchResult{matches:result,total:l as u64};
+    Ok(Json(sr))
+}
+#[openapi(skip)]
 #[get("/")]
 fn index() -> Json<Greeting> {
     Json(Greeting {
         message: "Hello, welcome to our server!".to_string(),
     })
 }
+
 
 #[derive(Default)]
 struct ServerState {
@@ -165,8 +187,22 @@ async fn main() -> eyre::Result<()> {
     }));
     rocket::build()
     .manage(server_state)
-    .mount("/", routes![index])
+    //.mount("/", routes![index, search])
     .mount("/dashboard", FileServer::from("static"))
+    .mount(
+        "/",
+        openapi_get_routes![
+            index,
+            search
+        ],
+    )
+    .mount(
+        "/swagger-ui/",
+        make_swagger_ui(&SwaggerUIConfig {
+            url: "../openapi.json".to_owned(),
+            ..Default::default()
+        }),
+    )
     .ignite().await?
     .launch().await?;
 

@@ -10,6 +10,12 @@ zip = "0.6.6"
 mimalloc = { version = "*", default-features = false }
 eyre = "0.6.12"
 tokio = "1.37.0"
+okapi = "0.7.0"
+rocket_okapi = { version = "0.8.0", features = ["swagger"] }
+swagger-ui = "0.1.5"
+swagger = "6.4.1"
+jsonschema = "0.18.0"
+schemars = "0.8.20"
 
 [dependencies.rocket]
 version = "0.5.0-rc.1"
