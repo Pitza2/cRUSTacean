@@ -1,13 +1,19 @@
 #[macro_use] extern crate rocket;
+extern crate rmp_serde as rmps;
 
 use std::{
-    borrow::Borrow, collections::HashMap, fs::File, io::{BufRead, BufReader}, sync::{Arc, RwLock}, time::Instant, vec
+    borrow::Borrow, collections::HashMap, fs::File, io::{BufRead, BufReader, Read, Write}, ptr::read, sync::{Arc, RwLock}, time::Instant, vec
 };
+
 use rocket_okapi::{openapi, openapi_get_routes, swagger_ui::*, JsonSchema};
 
-use rocket::{fs::FileServer, http::hyper::server::{self, Server}, serde::json::Json,State};
+use rocket::{figment::util::vec_tuple_map::deserialize, fs::FileServer, http::hyper::server::{self, Server}, serde::json::Json, State};
 
 use serde::{Deserialize, Serialize};
+use rmps::{Deserializer, Serializer};
+
+use std::fs::OpenOptions;
+
 
 type Term = String;
 type DocumentId = String;
@@ -17,11 +23,25 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-#[derive(Default)]
+#[derive(Default,Debug, PartialEq, Deserialize, Serialize)]
+struct MappedDocumentIds{
+    count:u64,
+    data:HashMap<u64,DocumentId>
+
+   
+}
+impl MappedDocumentIds {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Default,Debug, PartialEq, Deserialize, Serialize)]
 struct IndexedData {
-    terms_to_docs: HashMap<Term, Vec<DocumentId>>,
+    terms_to_docs: HashMap<Term, Vec<u64>>,
     idf: HashMap<Term, f64>,
     num_docs: usize,
+    mapped_doc_ids:MappedDocumentIds
 }
 
 impl IndexedData {
@@ -29,6 +49,8 @@ impl IndexedData {
         Self::default()
     }
 }
+
+
 
 #[derive(Debug, Serialize, Deserialize)]
 struct FileData {
@@ -38,7 +60,7 @@ struct FileData {
     files: Vec<String>,
 }
 
-fn compute_idf(terms_to_docs: &HashMap<Term, Vec<DocumentId>>) -> HashMap<Term, f64> {
+fn compute_idf(terms_to_docs: &HashMap<Term, Vec<u64>>) -> HashMap<Term, f64> {
     let n = terms_to_docs.len() as f64;
     let mut terms_idf = HashMap::new();
     for (term, docs) in terms_to_docs {
@@ -48,6 +70,21 @@ fn compute_idf(terms_to_docs: &HashMap<Term, Vec<DocumentId>>) -> HashMap<Term, 
     }
 
     terms_idf
+}
+
+
+fn writeZipDataToFile(data: &IndexedData,path:String)->Result<(), Box<dyn std::error::Error>>{
+    let mut file = OpenOptions::new().create(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+
+    
+    let mut buf = Vec::new();
+    
+    data.serialize(&mut Serializer::new(&mut buf)).unwrap();
+    file.write_all(&buf).unwrap();
+    Ok(())
 }
 
 fn load_data(
@@ -65,16 +102,18 @@ fn load_data(
         for file in fd.files {
             for term in file.split("/") {
                 if let Some(set) = index.terms_to_docs.get_mut(term) {
-                    if set.last() != Some(&fd.name) {
-                        set.push(fd.name.clone());
+                    if set.last() != Some(&index.mapped_doc_ids.count) {
+                        set.push(index.mapped_doc_ids.count);
                     }
                 } else {
                     let mut set = Vec::new();
-                    set.push(fd.name.clone());
+                    set.push(index.mapped_doc_ids.count);
                     index.terms_to_docs.insert(term.to_string(), set);
                 }
             }
         }
+        index.mapped_doc_ids.data.insert(index.mapped_doc_ids.count,fd.name );
+        index.mapped_doc_ids.count+=1;
 
         index.num_docs += 1;
     }
@@ -83,22 +122,26 @@ fn load_data(
     Ok(index)
 }
 
+
 fn run_search(data: &IndexedData, terms: Vec<&str>) -> Vec<SearchMatch> {
-    let mut counter: HashMap<DocumentId, u64> = HashMap::new();
+    let mut counter: HashMap<u64, u64> = HashMap::new();
     for term in &terms {
         if let Some(docs) = data.terms_to_docs.get(*term) {
+            println!("caca: {:?}",docs);
             for doc in docs {
-                let x = counter.entry(doc.to_string()).or_insert(0);
+                let x = counter.entry(*doc).or_insert(0);
                 *x += 1;
             }
         }
     }
 
     let mut scores: Vec<SearchMatch> = Vec::new();
-    for (doc, cnt) in counter {//(doc.to_string(), cnt as f64 / terms.len() as f64)
-        scores.push(SearchMatch{md5:doc.to_string(),score:cnt as f64/terms.len() as f64});
+    for (doc, cnt) in counter {//aparent foreach prin hashmap iti da alta ordine 
+        print!("{} ",doc);
+        scores.push(SearchMatch{md5:data.mapped_doc_ids.data.get(&doc).unwrap().clone(),score:cnt as f64/terms.len() as f64});
     }
-    scores.sort_by(|a, b| b.score.total_cmp(&a.score));
+    println!();
+    //scores.sort_by(|a, b| b.score.total_cmp(&a.score));
     scores
 }
 
@@ -128,7 +171,7 @@ fn search(req:Json<SearchData>,server_state: &State<Arc<RwLock<ServerState>>>) -
     let vec_of_strs: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
     let result=run_search(&server_state.read().unwrap().index, vec_of_strs);
     let l=result.len();
-    let sr=SearchResult{matches:result,total:l as u64};
+    let sr=SearchResult{ matches:result,total:l as u64};
     Ok(Json(sr))
 }
 #[openapi(skip)]
@@ -147,16 +190,56 @@ struct ServerState {
 
 #[rocket::main]
 async fn main() -> eyre::Result<()> {
-
+    let file=OpenOptions::new().read(true).open("data.txt");
+    let start = Instant::now();
     let args: Vec<String> = std::env::args().collect();
     let data_filename = &args[1];
-    let limit = args
+    if ( ! ( args.len()>2 && args[2].eq("reload") ) ) && file.is_ok(){ //cam ass backwards ca ai vrea sa ai pe reload true partea de citit json si scris fisier maybe refactorizez later
+        let mut reader = std::io::BufReader::new(file.unwrap());
+        println!("caca");
+        let mut buf:Vec<u8>=Vec::new();
+        reader.read_to_end(&mut buf).unwrap();
+        let mut deser=Deserializer::new(&buf[..]);
+        let data: IndexedData = Deserialize::deserialize(&mut deser).unwrap();
+        let server_state = Arc::new(RwLock::new(ServerState {
+            index: data,
+        }));
+        rocket::build()
+        .manage(server_state)
+        .mount("/dashboard", FileServer::from("static"))
+        .mount(
+            "/",
+            openapi_get_routes![
+                index,
+                search
+            ],
+        )
+        .mount(
+            "/swagger-ui/",
+            make_swagger_ui(&SwaggerUIConfig {
+                url: "../openapi.json".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .ignite().await?
+        .launch().await?;
+    
+    }else{
+    let limit; 
+    if args[2].eq("reload") {//alt workaround I guess acum ca a am pus inca un cmd arg nu mai merge get(2) ca imi ia argul reload
+    limit = args
+        .get(3)
+        .map(|x| usize::from_str_radix(&x, 10))
+        .transpose()?;
+    }else{
+        limit = args
         .get(2)
         .map(|x| usize::from_str_radix(&x, 10))
         .transpose()?;
+    }
 
     println!("loading {data_filename}...");
-    let start = Instant::now();
+
 
     let data = load_data(data_filename, limit)?;
 
@@ -165,29 +248,17 @@ async fn main() -> eyre::Result<()> {
         .iter()
         .map(|(_, docs)| docs.len())
         .sum::<usize>();
-    println!(
-        "loaded data for {} docs, {} terms, {} term-docid pairs, in {:.2}s",
-        data.num_docs,
-        data.terms_to_docs.len(),
-        pair_count,
-        start.elapsed().as_secs_f64(),
-    );
 
     let start = Instant::now();
     let search = vec!["lombok", "AUTHORS", "README.md"];
     let matches = run_search(&data, search);
-    println!(
-        "search found {} matches in {:.2}s",
-        matches.len(),
-        start.elapsed().as_secs_f64(),
-    );
+    writeZipDataToFile(&data,"data.txt".to_string()).unwrap();
     
     let server_state = Arc::new(RwLock::new(ServerState {
         index: data,
     }));
     rocket::build()
     .manage(server_state)
-    //.mount("/", routes![index, search])
     .mount("/dashboard", FileServer::from("static"))
     .mount(
         "/",
@@ -205,6 +276,7 @@ async fn main() -> eyre::Result<()> {
     )
     .ignite().await?
     .launch().await?;
-
+    }
+    println!("server started in {}", start.elapsed().as_secs_f64());
     Ok(())
 }

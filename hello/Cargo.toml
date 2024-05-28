@@ -16,6 +16,8 @@ swagger-ui = "0.1.5"
 swagger = "6.4.1"
 jsonschema = "0.18.0"
 schemars = "0.8.20"
+clippy = "0.0.302"
+rmp-serde = "1.3.0"
 
 [dependencies.rocket]
 version = "0.5.0-rc.1"
